@@ -1,4 +1,4 @@
-// Copyright 2018 The go-ethereum Authors
+// Copyright 2023 The go-ethereum Authors
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -14,25 +14,19 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-//go:build js
-// +build js
+//go:build !linux
+// +build !linux
 
 package rpc
 
-import (
-	"context"
-	"errors"
-	"net"
-)
+import "context"
 
-var errNotSupported = errors.New("rpc: not supported")
+var ErrNotSupportPlatform = errors.New("vsock: not supported on this platform")
 
-// ipcListen will create a named pipe on the given endpoint.
-func ipcListen(endpoint string) (net.Listener, error) {
-	return nil, errNotSupported
-}
-
-// newIPCConnection will connect to a named pipe with the given endpoint as name.
-func newIPCConnection(ctx context.Context, endpoint string) (net.Conn, error) {
-	return nil, errNotSupported
+// DialVsock create a new vsock client that connects to the given endpoint. The endpoint only works on Linux.
+// The endpoint is a string of the form "cid:port" where cid is the context ID and port is the port number.
+// The context is used for the initial connection establishment. It does not
+// affect subsequent interactions with the client.
+func DialVsock(ctx context.Context, endpoint string) (*Client, error) {
+	return nil, ErrNotSupportPlatform
 }

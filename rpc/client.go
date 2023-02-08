@@ -178,6 +178,8 @@ func DialContext(ctx context.Context, rawurl string) (*Client, error) {
 		return DialWebsocket(ctx, rawurl, "")
 	case "stdio":
 		return DialStdIO(ctx)
+	case "vsock":
+		return DialVsock(ctx, rawurl)
 	case "":
 		return DialIPC(ctx, rawurl)
 	default:
