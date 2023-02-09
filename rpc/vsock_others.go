@@ -24,9 +24,14 @@ import "context"
 var ErrNotSupportPlatform = errors.New("vsock: not supported on this platform")
 
 // DialVsock create a new vsock client that connects to the given endpoint. The endpoint only works on Linux.
-// The endpoint is a string of the form "cid:port" where cid is the context ID and port is the port number.
+// The endpoint is a string of the form "vscok://cid:port" where cid is the context ID and port is the port number.
 // The context is used for the initial connection establishment. It does not
 // affect subsequent interactions with the client.
 func DialVsock(ctx context.Context, endpoint string) (*Client, error) {
+	return nil, ErrNotSupportPlatform
+}
+
+// VsockListen will create a vsock on the given endpoint.
+func VsockListen(endpoint string) (net.Listener, error) {
 	return nil, ErrNotSupportPlatform
 }

@@ -16,7 +16,7 @@ Cloud Service:
 
 > **instance rold need add AmazonEC2RoleforSSM policy.**
 
-> *Account Enclaves only unlock single account*
+> *Account Enclave only Unseal single account*
 
 tools: 
 
@@ -73,16 +73,16 @@ Run the enclave.
 sudo nitro-cli run-enclave --enclave-name account-enclave --cpu-count 2 --memory 1024Mib --eif-path /opt/account-enclave.eif --enclave-cid 16
 ```
 
-Unlock account. (in the host node)
+Unseal account. (in the host node)
 
 ```shell
-# unlock account
-account-enclave unlock --daemon --aws.sm.region <REGION> --aws.sm.secret-id <SECRET_ARN> vsock://<CID>:<PORT>
+# Unseal account
+account-enclave unseal --daemon --aws.sm.region <REGION> --aws.sm.arn <SECRET_ARN> vsock://<CID>:<PORT>
 ```
 
 command arguments:
 
-- `--daemon` : run as a daemon, poll account state, keep account unlock, if enclaves restart, unlock account again.
+- `--daemon` : run as a daemon, poll account state, keep account Unseal, if enclaves restart, Unseal account again.
 - `--aws.sm.region <REGION>` : the region of the AWS Secrets Manager
 - `--aws.sm.secret-id <SECRET_ARN>` : the private key id of the AWS Secrets Manager
 
