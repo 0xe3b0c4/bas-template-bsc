@@ -2,16 +2,22 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha512"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/signer/core"
@@ -39,13 +45,35 @@ const (
 	vsockProxyPort = "8000" // vsock-proxy listen port, default 8000
 )
 
-func randomString(strlen int) string {
-	b := make([]byte, strlen)
-	rand.Read(b)
-	return string(b)
+// wrapper for the external API, but remove the `New` method
+type EnclaveAPI interface {
+	// List available accounts
+	List(ctx context.Context) ([]common.Address, error)
+	// SignTransaction request to sign the specified transaction
+	SignTransaction(ctx context.Context, args core.SendTxArgs, methodSelector *string) (*ethapi.SignTransactionResult, error)
+	// SignData - request to sign the given data (plus prefix)
+	SignData(ctx context.Context, contentType string, addr common.MixedcaseAddress, data interface{}) (hexutil.Bytes, error)
+	// SignTypedData - request to sign the given structured data (plus prefix)
+	SignTypedData(ctx context.Context, addr common.MixedcaseAddress, data core.TypedData) (hexutil.Bytes, error)
+	// EcRecover - recover public key from given message and signature
+	EcRecover(ctx context.Context, data hexutil.Bytes, sig hexutil.Bytes) (common.Address, error)
+	// Version info about the APIs
+	Version(ctx context.Context) (string, error)
+	// SignGnosisSafeTransaction signs/confirms a gnosis-safe multisig transaction
+	SignGnosisSafeTx(ctx context.Context, signerAddress common.MixedcaseAddress, gnosisTx core.GnosisSafeTx, methodSelector *string) (*core.GnosisSafeTx, error)
+}
+
+// unlock private key from AWS Secrets Manager
+type EnclaveAuthentication interface {
+	// unseal private key
+	Unseal(ctx context.Context, credential Credential) (string, error)
+	// unseal status
+	Status(ctx context.Context) string
 }
 
 type enclaveSigner struct {
+	unsealMux sync.Mutex
+
 	am   *accounts.Manager
 	api  *core.SignerAPI
 	keys *keystore.KeyStore
@@ -81,6 +109,16 @@ func (signer *enclaveSigner) API() *core.SignerAPI {
 // unseal private key
 // call kmstool_enclave_cli tool to get private key from AWS Secrets Manager
 func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) (string, error) {
+	signer.unsealMux.Lock()
+
+	// unlock after 5 seconds, aws api limit call rate
+	defer func() {
+		go func() {
+			time.Sleep(5 * time.Second)
+			signer.unsealMux.Unlock()
+		}()
+	}()
+
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -100,10 +138,12 @@ func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) 
 		return UnsealMessageFailed, err
 	}
 
-	b64privkey, err := cmd.Output()
-	if err != nil {
+	privkeyBytes, err := cmd.Output()
+	if err != nil || len(privkeyBytes) == 0 {
 		return UnsealMessageFailed, err
 	}
+
+	b64privkey := strings.TrimSpace(string(privkeyBytes))
 
 	privkey, err := base64.StdEncoding.DecodeString(string(b64privkey))
 	if err != nil {
@@ -115,8 +155,10 @@ func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) 
 		return UnsealMessageFailed, err
 	}
 
-	// generate disposable password
-	password := randomString(32)
+	// generate tmp keystore password
+	// aws enclaves can't access the /dev/random or /dev/urandom device
+	privHash := sha512.Sum512(privkey)
+	password := hex.EncodeToString(privHash[:16])
 	account := accounts.Account{Address: crypto.PubkeyToAddress(key.PublicKey)}
 
 	account, err = signer.keys.ImportECDSA(key, password)

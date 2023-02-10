@@ -29,14 +29,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/internal/flags"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/ethereum/go-ethereum/signer/core"
 
 	"gopkg.in/urfave/cli.v1"
 )
@@ -115,32 +111,6 @@ and sends it to the enclave to unseal the private key so that the node can use i
 	}
 )
 
-// wrapper for the external API, but remove the `New` method
-type EnclaveAPI interface {
-	// List available accounts
-	List(ctx context.Context) ([]common.Address, error)
-	// SignTransaction request to sign the specified transaction
-	SignTransaction(ctx context.Context, args core.SendTxArgs, methodSelector *string) (*ethapi.SignTransactionResult, error)
-	// SignData - request to sign the given data (plus prefix)
-	SignData(ctx context.Context, contentType string, addr common.MixedcaseAddress, data interface{}) (hexutil.Bytes, error)
-	// SignTypedData - request to sign the given structured data (plus prefix)
-	SignTypedData(ctx context.Context, addr common.MixedcaseAddress, data core.TypedData) (hexutil.Bytes, error)
-	// EcRecover - recover public key from given message and signature
-	EcRecover(ctx context.Context, data hexutil.Bytes, sig hexutil.Bytes) (common.Address, error)
-	// Version info about the APIs
-	Version(ctx context.Context) (string, error)
-	// SignGnosisSafeTransaction signs/confirms a gnosis-safe multisig transaction
-	SignGnosisSafeTx(ctx context.Context, signerAddress common.MixedcaseAddress, gnosisTx core.GnosisSafeTx, methodSelector *string) (*core.GnosisSafeTx, error)
-}
-
-// unlock private key from AWS Secrets Manager
-type EnclaveAuthentication interface {
-	// unseal private key
-	Unseal(ctx context.Context, credential Credential) (string, error)
-	// unseal status
-	Status(ctx context.Context) string
-}
-
 var (
 	appContext context.Context
 	cancelFn   context.CancelFunc
@@ -197,6 +167,12 @@ func unsealAccount(ctx *cli.Context) error {
 			err := sendUnsealRequest(vsock, region, arn)
 			if err != nil {
 				log.Error("daemon unseal account failed", "err", err)
+			}
+
+			// sleep 10s
+			select {
+			case <-appContext.Done():
+			case <-time.After(10 * time.Second):
 			}
 		}
 	}

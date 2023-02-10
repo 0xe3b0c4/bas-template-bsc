@@ -5,7 +5,8 @@
 
 FROM amazonlinux:2 as builder
 
-RUN yum install -y \
+RUN yum update -y &&\
+	yum install -y \
 	cmake3 \
 	gcc \
 	git \
@@ -85,10 +86,14 @@ RUN cd /go-ethereum && make all-static
 # kmstool-enclave-cli
 FROM amazonlinux:2 as kmstool-enclave-cli
 
-ENV CHAIN_ID=0
-ENV VSOCK_PROT=8545
+ARG CHAIN_ID
+ARG VSOCK_PROT=8545
 
-RUN rpm -e python python-libs python-urlgrabber python2-rpm pygpgme pyliblzma python-iniparse pyxattr python-pycurl amazon-linux-extras yum yum-metadata-parser yum-plugin-ovl yum-plugin-priorities
+ENV CHAIN_ID=${CHAIN_ID}
+ENV VSOCK_PROT=${VSOCK_PROT}
+
+RUN yum update -y &&\
+	rpm -e python python-libs python-urlgrabber python2-rpm pygpgme pyliblzma python-iniparse pyxattr python-pycurl amazon-linux-extras yum yum-metadata-parser yum-plugin-ovl yum-plugin-priorities
 
 COPY --from=builder /usr/lib64/libnsm.so /usr/lib64/libnsm.so
 COPY --from=builder /usr/bin/kmstool_enclave_cli /usr/bin/kmstool_enclave_cli
