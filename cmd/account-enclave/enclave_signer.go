@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/signer/core"
 	"github.com/ethereum/go-ethereum/signer/fourbyte"
 	"github.com/ethereum/go-ethereum/signer/storage"
@@ -27,6 +28,10 @@ var (
 
 	// UnsealState
 	UnsealState = "unseal"
+
+	// UnsealMessage
+	UnsealMessageFailed  = "unseal_failed"
+	UnsealMessageSuccess = "unseal_success"
 )
 
 const (
@@ -75,7 +80,7 @@ func (signer *enclaveSigner) API() *core.SignerAPI {
 
 // unseal private key
 // call kmstool_enclave_cli tool to get private key from AWS Secrets Manager
-func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) error {
+func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) (string, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -92,22 +97,22 @@ func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) 
 
 	err := cmd.Wait()
 	if err != nil {
-		return err
+		return UnsealMessageFailed, err
 	}
 
 	b64privkey, err := cmd.Output()
 	if err != nil {
-		return err
+		return UnsealMessageFailed, err
 	}
 
 	privkey, err := base64.StdEncoding.DecodeString(string(b64privkey))
 	if err != nil {
-		return err
+		return UnsealMessageFailed, err
 	}
 
 	key, err := crypto.HexToECDSA(string(privkey))
 	if err != nil {
-		return err
+		return UnsealMessageFailed, err
 	}
 
 	// generate disposable password
@@ -116,23 +121,63 @@ func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) 
 
 	account, err = signer.keys.ImportECDSA(key, password)
 	if err != nil {
-		return err
+		return UnsealMessageFailed, err
 	}
 
 	err = signer.keys.Unlock(account, password)
 	if err != nil {
-		return err
+		return UnsealMessageFailed, err
 	}
 
 	// cache the account
 	_, err = signer.am.Find(account)
 	if err != nil {
+		return UnsealMessageFailed, err
+	}
+
+	return UnsealMessageSuccess, err
+}
+
+func (signer *enclaveSigner) Status(ctx context.Context) string {
+	if len(signer.keys.Accounts()) > 0 {
+		return UnsealState
+	}
+
+	return SealState
+}
+
+// sendUnsealRequest send unseal request to enclave
+func sendUnsealRequest(vsock, region, arn string) error {
+	timeoutCtx, cancel := context.WithTimeout(appContext, time.Minute)
+	defer cancel()
+
+	client, err := rpc.DialContext(timeoutCtx, vsock)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	var stateResult string
+	if err := client.CallContext(timeoutCtx, &stateResult, "enclave_state"); err != nil {
 		return err
 	}
 
-	return nil
-}
+	// if enclave is unseal, skip it
+	if stateResult == SealState {
+		return nil
+	}
 
-func (signer *enclaveSigner) UnsealStatus(ctx context.Context) string {
-	return "seal"
+	credential, err := getSMEiphertext(timeoutCtx, region, arn)
+	if err != nil {
+		return err
+	}
+
+	var unsealResult string
+	if err := client.CallContext(timeoutCtx, &unsealResult, "enclave_Unseal", credential); err != nil {
+		return err
+	}
+
+	log.Info("enclave unseal result", "status", unsealResult)
+
+	return nil
 }

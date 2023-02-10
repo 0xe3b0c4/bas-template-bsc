@@ -24,10 +24,16 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/internal/flags"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/signer/core"
@@ -61,7 +67,7 @@ var (
 
 	regionFlag = cli.StringFlag{
 		Name:  "aws.sm.region",
-		Usage: "AWS region",
+		Usage: "AWS Secrets Manager Region",
 	}
 
 	arnFlag = cli.StringFlag{
@@ -94,38 +100,41 @@ and sends it to the enclave to unseal the private key so that the node can use i
 	}
 )
 
-type Credential struct {
-	// AWS EC2 instance region
-	Region string `json:"region"`
-
-	// AWS EC2 instance iam account access key
-	AccessKey string `json:"accessKey"`
-
-	// AWS EC2 instance iam account  secret access key
-	SecretAccessKey string `json:"secretAccessKey"`
-
-	// AWS EC2 instance session token
-	SessionToken string `json:"sessionToken"`
-
-	// ChainID
-	ChainID string `json:"chainID"`
-
-	// encrypted private key from AWS Secrets Manager
-	EncryptedEthKey string `json:"encryptedEthKey"`
+// wrapper for the external API, but remove the `New` method
+type EnclaveAPI interface {
+	// List available accounts
+	List(ctx context.Context) ([]common.Address, error)
+	// SignTransaction request to sign the specified transaction
+	SignTransaction(ctx context.Context, args core.SendTxArgs, methodSelector *string) (*ethapi.SignTransactionResult, error)
+	// SignData - request to sign the given data (plus prefix)
+	SignData(ctx context.Context, contentType string, addr common.MixedcaseAddress, data interface{}) (hexutil.Bytes, error)
+	// SignTypedData - request to sign the given structured data (plus prefix)
+	SignTypedData(ctx context.Context, addr common.MixedcaseAddress, data core.TypedData) (hexutil.Bytes, error)
+	// EcRecover - recover public key from given message and signature
+	EcRecover(ctx context.Context, data hexutil.Bytes, sig hexutil.Bytes) (common.Address, error)
+	// Version info about the APIs
+	Version(ctx context.Context) (string, error)
+	// SignGnosisSafeTransaction signs/confirms a gnosis-safe multisig transaction
+	SignGnosisSafeTx(ctx context.Context, signerAddress common.MixedcaseAddress, gnosisTx core.GnosisSafeTx, methodSelector *string) (*core.GnosisSafeTx, error)
 }
 
 // unlock private key from AWS Secrets Manager
 type EnclaveAuthentication interface {
 	// unseal private key
-	Unseal(ctx context.Context, credential Credential) error
+	Unseal(ctx context.Context, credential Credential) (string, error)
 	// unseal status
-	UnsealStatus(ctx context.Context) string
+	Status(ctx context.Context) string
 }
 
+var (
+	appContext context.Context
+	cancelFn   context.CancelFunc
+)
+
 func init() {
-	// Initialize
+	// Initialize the CLI app and start action
 	app.Name = "account-enclave"
-	app.Action = enclaveAPI
+	app.Action = enclaveAPIServer
 	app.HideVersion = true
 	app.Commands = []cli.Command{
 		UnsealCommand,
@@ -134,6 +143,10 @@ func init() {
 }
 
 func main() {
+	// init app context
+	appContext, cancelFn = context.WithCancel(context.Background())
+	defer cancelFn()
+
 	if err := app.Run(os.Args); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -141,11 +154,39 @@ func main() {
 }
 
 func unsealAccount(ctx *cli.Context) error {
-	// TODO
-	return nil
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigs
+
+		cancelFn()
+	}()
+
+	isDaemon := ctx.Bool(daemonFlag.Name)
+	region := ctx.String(regionFlag.Name)
+	arn := ctx.String(arnFlag.Name)
+	vsock := ctx.String(vsockUlr.Name)
+
+	if !isDaemon {
+		return sendUnsealRequest(vsock, region, arn)
+	} else {
+		for {
+			select {
+			case <-appContext.Done():
+				return nil
+			default:
+			}
+
+			err := sendUnsealRequest(vsock, region, arn)
+			if err != nil {
+				log.Error("daemon unseal account failed", "err", err)
+			}
+		}
+	}
 }
 
-func enclaveAPI(ctx *cli.Context) error {
+func enclaveAPIServer(ctx *cli.Context) error {
 	signer := &enclaveSigner{}
 	signer.init()
 
@@ -156,7 +197,7 @@ func enclaveAPI(ctx *cli.Context) error {
 
 	var (
 		auth EnclaveAuthentication
-		api  core.ExternalAPI
+		api  EnclaveAPI
 	)
 
 	auth = signer
@@ -190,7 +231,13 @@ func enclaveAPI(ctx *cli.Context) error {
 		IdleTimeout:  IdleTimeout,
 	}
 
-	httpSrv.Serve(listen)
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	return nil
+	go func() {
+		<-sigs
+		httpSrv.Shutdown(appContext)
+	}()
+
+	return httpSrv.Serve(listen)
 }
