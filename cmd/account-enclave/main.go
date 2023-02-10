@@ -46,10 +46,6 @@ const (
 	ReadTimeout               = 30 * time.Second
 	WriteTimeout              = 30 * time.Second
 	IdleTimeout               = 30 * time.Second
-
-	// modify this
-	chainID   int64  = 0
-	vsockProt uint32 = 8545
 )
 
 var (
@@ -59,7 +55,26 @@ var (
 
 	app = flags.NewApp(gitCommit, gitDate, "the external signer service")
 
-	// flags
+	/// Flags definition
+	// global flags
+	chainID = cli.Int64Flag{
+		Name:   "chainID",
+		Usage:  "Chain ID for the signer",
+		EnvVar: "CHAIN_ID",
+		Hidden: true,
+		Value:  0,
+	}
+
+	// vsock port
+	vsockProt = cli.UintFlag{
+		Name:   "vsock.prot",
+		Usage:  "The vscok port on the enclave",
+		EnvVar: "VSOCK_PROT",
+		Hidden: true,
+		Value:  8545,
+	}
+
+	// unseal command flags
 	daemonFlag = cli.BoolFlag{
 		Name:  "daemon",
 		Usage: "Run as a daemon, if enclave restart try unseal account again",
@@ -139,6 +154,7 @@ func init() {
 	app.Commands = []cli.Command{
 		UnsealCommand,
 	}
+	app.Flags = append(app.Flags, chainID, vsockProt)
 	cli.CommandHelpTemplate = flags.OriginCommandHelpTemplate
 }
 
@@ -187,10 +203,13 @@ func unsealAccount(ctx *cli.Context) error {
 }
 
 func enclaveAPIServer(ctx *cli.Context) error {
-	signer := &enclaveSigner{}
-	signer.init()
+	chainID := ctx.Int64(chainID.Name)
+	vsock := ctx.Uint(vsockProt.Name)
 
-	listen, err := rpc.VsockListen(vsockProt)
+	signer := &enclaveSigner{}
+	signer.init(chainID)
+
+	listen, err := rpc.VsockListen(uint32(vsock))
 	if err != nil {
 		utils.Fatalf("Could not listen on vsock: %w", err)
 	}

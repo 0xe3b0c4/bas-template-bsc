@@ -51,7 +51,7 @@ type enclaveSigner struct {
 	keys *keystore.KeyStore
 }
 
-func (signer *enclaveSigner) init() {
+func (signer *enclaveSigner) init(chainID int64) {
 	db, err := fourbyte.NewWithFile("")
 	if err != nil {
 		panic(err)
