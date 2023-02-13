@@ -1,19 +1,31 @@
+// Copyright 2023 The go-ethereum Authors
+// This file is part of go-ethereum.
+//
+// go-ethereum is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// go-ethereum is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with go-ethereum. If not, see <http://www.gnu.org/licenses/>.
+
 package main
 
 import (
 	"context"
-	"crypto/sha512"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -74,9 +86,8 @@ type EnclaveAuthentication interface {
 type enclaveSigner struct {
 	unsealMux sync.Mutex
 
-	am   *accounts.Manager
 	api  *core.SignerAPI
-	keys *keystore.KeyStore
+	keys *memKeyStore
 }
 
 func (signer *enclaveSigner) init(chainID int64) {
@@ -88,12 +99,7 @@ func (signer *enclaveSigner) init(chainID int64) {
 	embeds, locals := db.Size()
 	log.Info("Loaded 4byte database", "embeds", embeds, "locals", locals)
 
-	signer.keys = keystore.NewKeyStore(
-		os.TempDir(),
-		keystore.StandardScryptN,
-		keystore.StandardScryptP,
-	)
-
+	signer.keys = newMemKeyStore()
 	am := accounts.NewManager(
 		&accounts.Config{InsecureUnlockAllowed: false},
 		signer.keys,
@@ -155,24 +161,7 @@ func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) 
 		return UnsealMessageFailed, err
 	}
 
-	// generate tmp keystore password
-	// aws enclaves can't access the /dev/random or /dev/urandom device
-	privHash := sha512.Sum512(privkey)
-	password := hex.EncodeToString(privHash[:16])
-	account := accounts.Account{Address: crypto.PubkeyToAddress(key.PublicKey)}
-
-	account, err = signer.keys.ImportECDSA(key, password)
-	if err != nil {
-		return UnsealMessageFailed, err
-	}
-
-	err = signer.keys.Unlock(account, password)
-	if err != nil {
-		return UnsealMessageFailed, err
-	}
-
-	// cache the account
-	_, err = signer.am.Find(account)
+	_, err = signer.keys.ImportECDSA(key)
 	if err != nil {
 		return UnsealMessageFailed, err
 	}
@@ -181,7 +170,7 @@ func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) 
 }
 
 func (signer *enclaveSigner) Status(ctx context.Context) string {
-	if len(signer.keys.Accounts()) > 0 {
+	if len(signer.keys.Wallets()) > 0 {
 		return UnsealState
 	}
 
