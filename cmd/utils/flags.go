@@ -520,8 +520,8 @@ var (
 	// Vault unlock settings
 	VaultAddressFlag = cli.StringFlag{
 		Name:  "vault.address",
-		Usage: "Vault server address",
-		Value: "http://127.0.0.1:8200",
+		Usage: "Vault server address (like http://127.0.0.1:8200)",
+		Value: "",
 	}
 	VaultTimeoutFlag = cli.DurationFlag{
 		Name:  "vault.timeout",
@@ -1161,7 +1161,7 @@ func MakeAddress(ks *keystore.KeyStore, account string) (accounts.Account, error
 
 // setEtherbase retrieves the etherbase either from the directly specified
 // command line flags or from the keystore if CLI indexed.
-func setEtherbase(ctx *cli.Context, ks *keystore.KeyStore, cfg *ethconfig.Config) {
+func setEtherbase(ctx *cli.Context, am *accounts.Manager, cfg *ethconfig.Config) {
 	// Extract the current etherbase
 	var etherbase string
 	if ctx.GlobalIsSet(MinerEtherbaseFlag.Name) {
@@ -1169,15 +1169,35 @@ func setEtherbase(ctx *cli.Context, ks *keystore.KeyStore, cfg *ethconfig.Config
 	}
 	// Convert the etherbase into an address and configure it
 	if etherbase != "" {
-		if ks != nil {
-			account, err := MakeAddress(ks, etherbase)
-			if err != nil {
+		var accs []accounts.Account
+		for _, wall := range am.Wallets() {
+			accs = append(accs, wall.Accounts()...)
+		}
+
+		// If the specified account is a valid address, return it
+		if common.IsHexAddress(etherbase) {
+			address := common.HexToAddress(etherbase)
+			// find the account in the list of accounts
+			for _, acc := range accs {
+				if acc.Address == address {
+					cfg.Miner.Etherbase = acc.Address
+					return
+				}
+			}
+
+			Fatalf("Invalid miner etherbase: %v", etherbase)
+		} else {
+			index, err := strconv.Atoi(etherbase)
+			if err != nil || index < 0 {
 				Fatalf("Invalid miner etherbase: %v", err)
 			}
-			cfg.Miner.Etherbase = account.Address
-		} else {
-			Fatalf("No etherbase configured")
+
+			if index < len(accs) {
+				cfg.Miner.Etherbase = accs[index].Address
+			}
 		}
+
+		Fatalf("Invalid miner etherbase: %v", etherbase)
 	}
 }
 
@@ -1551,11 +1571,7 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	if ctx.GlobalIsSet(LightServeFlag.Name) && ctx.GlobalUint64(TxLookupLimitFlag.Name) != 0 {
 		log.Warn("LES server cannot serve old transaction status and cannot connect below les/4 protocol version if transaction lookup index is limited")
 	}
-	var ks *keystore.KeyStore
-	if keystores := stack.AccountManager().Backends(keystore.KeyStoreType); len(keystores) > 0 {
-		ks = keystores[0].(*keystore.KeyStore)
-	}
-	setEtherbase(ctx, ks, cfg)
+	setEtherbase(ctx, stack.AccountManager(), cfg)
 	setGPO(ctx, &cfg.GPO, ctx.GlobalString(SyncModeFlag.Name) == "light")
 	setTxPool(ctx, &cfg.TxPool)
 	setEthash(ctx, cfg)
@@ -1716,6 +1732,13 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 			// when we're definitely concerned with only one account.
 			passphrase = list[0]
 		}
+
+		// get the keystore
+		var ks *keystore.KeyStore
+		if keystores := stack.AccountManager().Backends(keystore.KeyStoreType); len(keystores) > 0 {
+			ks = keystores[0].(*keystore.KeyStore)
+		}
+
 		// setEtherbase has been called above, configuring the miner address from command line flags.
 		if cfg.Miner.Etherbase != (common.Address{}) {
 			developer = accounts.Account{Address: cfg.Miner.Etherbase}

@@ -93,11 +93,11 @@ func (signer *enclaveSigner) init(chainID int64) {
 
 	signer.keys = newMemKeyStore()
 	am := accounts.NewManager(
-		&accounts.Config{InsecureUnlockAllowed: false},
+		&accounts.Config{InsecureUnlockAllowed: true},
 		signer.keys,
 	)
 
-	signer.api = core.NewSignerAPI(am, chainID, true, nil, db, false, &storage.NoStorage{})
+	signer.api = core.NewSignerAPI(am, chainID, true, NewHeadlessConfirmUI(), db, false, &storage.NoStorage{})
 }
 
 func (signer *enclaveSigner) API() *core.SignerAPI {

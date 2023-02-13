@@ -23,12 +23,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"syscall"
 	"time"
 
 	"sync/atomic"
 
+	"github.com/ethereum/go-ethereum/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -93,6 +95,45 @@ func vsocket() (int, error) {
 		default:
 			// Unhandled error.
 			return -1, os.NewSyscallError("socket", err)
+		}
+	}
+}
+
+func vsockConnect(fd int, addr *unix.SockaddrVM) error {
+	for {
+		err := unix.Connect(fd, addr)
+
+		switch {
+		case err == nil:
+			return nil
+		case vsockNoReady(err):
+			continue
+		default:
+			return err
+		}
+	}
+}
+
+func vsockGetsockename(fd int) (*vsockAddr, error) {
+	localAddr := &vsockAddr{}
+
+	for {
+		lsa, err := unix.Getsockname(fd)
+
+		switch {
+		case err == nil:
+			if savm, ok := lsa.(*unix.SockaddrVM); ok {
+				localAddr.cid = savm.CID
+				localAddr.port = savm.Port
+			}
+
+			return localAddr, nil
+		case vsockNoReady(err):
+			continue
+		default:
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 }
@@ -172,41 +213,38 @@ func (c *vsockConn) RemoteAddr() net.Addr {
 }
 
 // newVsockConnection creates a new vsock connect wrap to Conn interface
-func newVsockConnection(ctx context.Context, endpoint string) (Conn, error) {
+func newVsockConnection(ctx context.Context, endpoint string) (net.Conn, error) {
 	// Parse the endpoint into a context ID and port.
 	// The endpoint is a string of the form "vsock://cid:port" where cid is the context ID
 	cid, port, err := parseVsockEndpoint(endpoint)
 	if err != nil {
+		log.Error("vsock endpoint format error", "endpoint", endpoint)
+
+		return nil, err
+	}
+
+	fd, err := vsocket()
+	if err != nil || fd < 0 {
+		log.Error("vsock open failed", "cid", cid, "port", port)
+
 		return nil, err
 	}
 
 	sa := &unix.SockaddrVM{CID: cid, Port: port}
 
-	fd, err := vsocket()
-	if err != nil || fd < 0 {
+	if err := vsockConnect(fd, sa); err != nil {
+		_ = unix.Close(fd)
+		log.Error("vsock connect failed", "err", err)
+
 		return nil, err
 	}
 
-	// All Conn I/O is nonblocking for integration with Go's runtime network
-	// poller. Depending on the OS this might already be set but it can't hurt
-	// to set it again.
-	if err := unix.SetNonblock(fd, true); err != nil {
-		_ = unix.Close(fd)
-
-		return nil, os.NewSyscallError("setnonblock", err)
-	}
-
-	// Get the local address of the socket.
-	lsa, err := unix.Getsockname(fd)
+	localAddr, err := vsockGetsockename(fd)
 	if err != nil {
 		_ = unix.Close(fd)
-		return nil, err
-	}
+		log.Error("vsock getsockname failed", "err", err)
 
-	localAddr := &vsockAddr{}
-	if savm, ok := lsa.(*unix.SockaddrVM); ok {
-		localAddr.cid = savm.CID
-		localAddr.port = savm.Port
+		return nil, err
 	}
 
 	// os.NewFile registers the non-blocking file descriptor with the runtime
@@ -215,12 +253,8 @@ func newVsockConnection(ctx context.Context, endpoint string) (Conn, error) {
 	// also: https://golang.org/pkg/os/#NewFile
 	f := os.NewFile(uintptr(fd), fmt.Sprintf("vsock_%d_%d", cid, port))
 	if err != nil {
-		return nil, err
-	}
-
-	err = unix.Connect(fd, sa)
-	if err != nil {
 		_ = unix.Close(fd)
+		log.Error("vsock to file descriptor failed")
 
 		return nil, err
 	}
@@ -242,12 +276,28 @@ func newVsockConnection(ctx context.Context, endpoint string) (Conn, error) {
 // The context is used for the initial connection establishment. It does not
 // affect subsequent interactions with the client.
 func DialVsock(ctx context.Context, endpoint string) (*Client, error) {
-	return newClient(ctx, func(ctx context.Context) (ServerCodec, error) {
-		conn, err := newVsockConnection(ctx, endpoint)
-		if err != nil {
-			return nil, err
+	log.Info("DialVsock", "endpoint", endpoint)
+
+	httpc := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return newVsockConnection(ctx, endpoint)
+			},
+		},
+	}
+
+	initctx := context.Background()
+	headers := make(http.Header, 2)
+	headers.Set("accept", contentType)
+	headers.Set("content-type", contentType)
+	return newClient(initctx, func(context.Context) (ServerCodec, error) {
+		hc := &httpConn{
+			client:  httpc,
+			headers: headers,
+			url:     "http://localhost:8545", // fake url
+			closeCh: make(chan interface{}),
 		}
-		return NewCodec(conn), err
+		return hc, nil
 	})
 }
 
