@@ -18,10 +18,7 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
-	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -50,11 +47,6 @@ var (
 	// UnsealMessage
 	UnsealMessageFailed  = "unseal_failed"
 	UnsealMessageSuccess = "unseal_success"
-)
-
-const (
-	kmstool        = "kmstool_enclave_cli"
-	vsockProxyPort = "8000" // vsock-proxy listen port, default 8000
 )
 
 // wrapper for the external API, but remove the `New` method
@@ -125,33 +117,7 @@ func (signer *enclaveSigner) Unseal(ctx context.Context, credential Credential) 
 		}()
 	}()
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(
-		timeoutCtx,
-		kmstool,
-		"--region", credential.Region,
-		"--proxy-port", vsockProxyPort,
-		"--aws-access-key-id", credential.AccessKey,
-		"--aws-secret-access-key", credential.SecretAccessKey,
-		"--aws-session-token", credential.SessionToken,
-		"--ciphertext", credential.EncryptedEthKey,
-	)
-
-	err := cmd.Wait()
-	if err != nil {
-		return UnsealMessageFailed, err
-	}
-
-	privkeyBytes, err := cmd.Output()
-	if err != nil || len(privkeyBytes) == 0 {
-		return UnsealMessageFailed, err
-	}
-
-	b64privkey := strings.TrimSpace(string(privkeyBytes))
-
-	privkey, err := base64.StdEncoding.DecodeString(string(b64privkey))
+	privkey, err := kmstoolEnclaveDecrypt(ctx, &credential)
 	if err != nil {
 		return UnsealMessageFailed, err
 	}

@@ -18,11 +18,21 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+)
+
+const (
+	kmstool        = "kmstool_enclave_cli"
+	vsockProxyPort = "8000" // vsock-proxy listen port, default 8000
 )
 
 type Credential struct {
@@ -77,4 +87,43 @@ func getSMEiphertext(ctx context.Context, secretRegion, secretARN string) (*Cred
 		SessionToken:    instanceCreds.SessionToken,
 		EncryptedEthKey: *result.SecretString,
 	}, err
+}
+
+func kmstoolEnclaveDecrypt(ctx context.Context, credential *Credential) (string, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(
+		timeoutCtx,
+		kmstool,
+		"--region", credential.Region,
+		"--proxy-port", vsockProxyPort,
+		"--aws-access-key-id", credential.AccessKey,
+		"--aws-secret-access-key", credential.SecretAccessKey,
+		"--aws-session-token", credential.SessionToken,
+		"--ciphertext", credential.EncryptedEthKey,
+	)
+
+	err := cmd.Wait()
+	if err != nil {
+		return "", err
+	}
+
+	privkeyBytes, err := cmd.Output()
+	if err != nil || len(privkeyBytes) == 0 {
+		return "", err
+	}
+
+	var b64privkey string
+	_, err = fmt.Sscanf(strings.TrimSpace(string(privkeyBytes)), "PLAINTEXT: %s\n", &b64privkey)
+	if err != nil {
+		return "", err
+	}
+
+	privkey, err := base64.StdEncoding.DecodeString(b64privkey)
+	if err != nil {
+		return "", err
+	}
+
+	return string(privkey), nil
 }
